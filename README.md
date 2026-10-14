@@ -55,6 +55,8 @@ and they run the whole page against a stub browser: a full play-through with mou
 picker, the daily garden and a portrait phone, plus the `#demo` and `#cover` pages. The canvas stub rejects
 NaN and negative radii, so a drawing bug fails the test.
 
+All 14 tests, including the Node ones, passed on Node 22 on 14 October 2026 (v0.1.0).
+
 Open `index.html#selftest` for the same checks in a browser, `#cover` for the three store covers, and
 `#demo` for a garden that plays itself (used for store videos; it never saves). `capture.py` runs all of that
 in headless Chromium with Playwright and writes the covers, screenshots and two 20-second videos.
