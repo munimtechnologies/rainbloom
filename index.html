@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Rainbloom</title>
+<!-- Rainbloom v0.1.0 (Apache-2.0), by MV2 of Munim, Inc., made with AI agents. Built on html-jam-kit: one self-contained HTML file. -->
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#bfe3ff;touch-action:none;user-select:none;-webkit-user-select:none}
+canvas{display:block;position:absolute}
+body.demo canvas{cursor:none}
+#test,#covers{position:absolute;inset:16px;overflow:auto;background:#101820f2;color:#e8eef4;border-radius:10px;padding:14px;z-index:3;white-space:pre-wrap;font:13px/1.4 ui-monospace,Consolas,monospace}
+#covers img{display:block;max-width:100%;margin:8px 0 18px;border:1px solid #ffffff33}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="test" hidden></div>
+<div id="covers" hidden></div>
+
+<script id="logic">
+"use strict";
+// Rainbloom rules: no DOM, no canvas, no audio, so the tests can run this block under Node.
+// A garden is a grid of channel tiles. Openings are bit masks: up=1, right=2, down=4, left=8; a tap turns a
+// tile 90 degrees clockwise. Clouds rain red (1) or blue (2); a tile reached by both carries violet (3).
+// Each flower blooms only in its own colour. Gardens grow from a seeded random spanning forest, one tree per
+// colour, so every garden is solvable and the same number always gives the same garden.
+const W=1280,H=720;                 // logical size in landscape; portrait screens use 720x1280
+const UP=1,RT=2,DN=4,LT=8,RED=1,BLUE=2,VIOLET=3;
+const DIRS=[{b:UP,dx:0,dy:-1,o:DN},{b:RT,dx:1,dy:0,o:LT},{b:DN,dx:0,dy:1,o:UP},{b:LT,dx:-1,dy:0,o:RT}];
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const rot=(m,k)=>{k=((k%4)+4)%4;return ((m<<k)|(m>>(4-k)))&15;};
+const bits=m=>(m&1)+(m>>1&1)+(m>>2&1)+(m>>3&1);
+const canTurn=c=>c.kind==="pipe"||c.kind==="flower";
+function shuffle(a,r){for(let k=a.length-1;k>0;k--){const j=Math.floor(r()*(k+1));[a[k],a[j]]=[a[j],a[k]];}return a;}
+
+// gardens that bring something new, with the line that introduces it
+const INTRO={1:"Tap a tile to turn it. Bring the rain to every flower.",
+  2:"Fewer turns earn more stars. Right-click turns a tile back.",
+  6:"Grey stones never turn. Work around them.",
+  9:"Some gardens have gaps. Water cannot cross them.",
+  12:"Red rain and blue rain! Each flower wants its own colour, so keep them apart.",
+  16:"Violet flowers need red and blue rain together."};
+
+// what garden n brings: size, how many tiles start turned (0 = all), stones, gaps and colours
+// colours: 1 = one blue tree; 2 = a red and a blue tree that must not meet; 3 = also a violet tree fed by both
+function levelSpec(n){
+  n=Math.max(1,Math.floor(n)||1);
+  const SIZES=[[3,3],[3,3],[4,3],[4,4],[5,4],[5,5],[5,5],[6,5],[6,5],[6,6],[6,6],[6,5],[6,6],[7,6],[7,6],[6,6],[7,6],[7,7],[7,7],[8,6]];
+  const [w,h]=n<=SIZES.length?SIZES[n-1]:n<=30?[8,7]:n<=50?[9,7]:[10,8];
+  let colors=n<12?1:n<16?2:3;
+  if(n>20)colors=[1,2,3,3,2,3][n%6];
+  return {n,w,h,scramble:n<=4?[2,3,5,8][n-1]:0,stones:n>=6,holes:n>=9,colors};
+}
+const levelSeed=n=>(n*7919+17)>>>0;
+function makeLevel(n){return genGarden(levelSpec(n),levelSeed(Math.max(1,Math.floor(n)||1)));}
+// one garden a day, the same for everyone on that date ("YYYY-MM-DD")
+function dailySeed(d){let h=2166136261;for(const ch of String(d))h=Math.imul(h^ch.charCodeAt(0),16777619);return h>>>0;}
+function dailySpec(seed){return {n:0,w:7,h:6,scramble:0,stones:true,holes:true,colors:2+seed%2};}
+function makeDaily(d){const s=dailySeed(d);return genGarden(dailySpec(s),s);}
+function dayIndex(d){const [y,m,dd]=String(d).split("-").map(Number);return Math.round(Date.UTC(y,m-1,dd)/864e5);}
+// a daily streak grows by one on the next calendar day and restarts after a missed day
+function nextStreak(prev,today){
+  if(!prev||!prev.date)return {date:today,streak:1};
+  const gap=dayIndex(today)-dayIndex(prev.date);
+  return gap===0?{date:prev.date,streak:prev.streak|0}:gap===1?{date:today,streak:(prev.streak|0)+1}:{date:today,streak:1};
+}
+
+function neighbours(w,h,i){const x=i%w,y=(i/w)|0,out=[];for(const d of DIRS){const nx=x+d.dx,ny=y+d.dy;if(nx>=0&&ny>=0&&nx<w&&ny<h)out.push([d,ny*w+nx]);}return out;}
+function connectedWithout(w,h,hole){
+  const start=hole.indexOf(false);if(start<0)return false;
+  const seen=new Set([start]),q=[start];
+  while(q.length){const i=q.pop();for(const [,j] of neighbours(w,h,i))if(!hole[j]&&!seen.has(j)){seen.add(j);q.push(j);}}
+  return seen.size===hole.filter(x=>!x).length;
+}
+// the tile farthest from s along the solution's channels (always a dead end)
+function farthest(w,h,cells,s){
+  const seen=new Set([s]),q=[s];let last=s;
+  while(q.length){const i=q.shift();last=i;for(const [d,j] of neighbours(w,h,i))if((cells[i].sol&d.b)&&!seen.has(j)){seen.add(j);q.push(j);}}
+  return last;
+}
+function genGarden(spec,seed){
+  const r=mulberry32(seed);
+  for(let attempt=0;attempt<80;attempt++){const L=growGarden(spec,r);if(L){L.seed=seed;return L;}}
+  throw new Error("could not grow garden "+spec.n);
+}
+function growGarden(spec,r){
+  const {w,h}=spec,n=w*h,k=spec.colors;
+  const hole=new Array(n).fill(false);
+  if(spec.holes){
+    let want=Math.round(n*0.1);
+    for(let guard=0;want>0&&guard<300;guard++){
+      const i=Math.floor(r()*n);if(hole[i])continue;
+      hole[i]=true;
+      if(connectedWithout(w,h,hole))want--;else hole[i]=false;
+    }
+  }
+  const free=[];for(let i=0;i<n;i++)if(!hole[i])free.push(i);
+  const comp=new Array(n).fill(-1),sol=new Array(n).fill(0),seeds=[];
+  while(seeds.length<k){const i=free[Math.floor(r()*free.length)];if(!seeds.includes(i))seeds.push(i);}
+  // grow one depth-first tree per colour, always extending the smallest: long winding channels
+  const stacks=seeds.map((s,c)=>{comp[s]=c;return [s];}),size=seeds.map(()=>1);
+  for(;;){
+    let c=-1;
+    for(let q=0;q<k;q++)if(stacks[q].length&&(c<0||size[q]<size[c]||(size[q]===size[c]&&r()<0.5)))c=q;
+    if(c<0)break;
+    const st=stacks[c],i=st[st.length-1];
+    const opts=neighbours(w,h,i).filter(([,j])=>!hole[j]&&comp[j]<0);
+    if(!opts.length){st.pop();continue;}
+    const [d,j]=opts[Math.floor(r()*opts.length)];
+    sol[i]|=d.b;sol[j]|=d.o;comp[j]=c;size[c]++;st.push(j);
+  }
+  const colours=[[BLUE],[RED,BLUE],[RED,BLUE,VIOLET]][k-1];
+  if(size.some((s,c)=>s<(colours[c]===VIOLET?5:3)))return null;
+  const cells=sol.map((s,i)=>hole[i]?{kind:"hole",sol:0,mask:0}:{kind:"pipe",sol:s,mask:s});
+  // a cloud on each tree's first tile; the violet tree gets a red cloud there and a blue one at its far end
+  seeds.forEach((s,c)=>{cells[s].kind="cloud";cells[s].color=colours[c]===VIOLET?RED:colours[c];});
+  if(k===3){
+    const far=farthest(w,h,cells,seeds[2]);
+    if(far===seeds[2])return null;
+    cells[far].kind="cloud";cells[far].color=BLUE;
+  }
+  cells.forEach((c,i)=>{if(c.kind==="pipe"&&bits(c.sol)===1){c.kind="flower";c.need=colours[comp[i]];}});
+  for(let c=0;c<k;c++)if(!cells.some((x,i)=>x.kind==="flower"&&comp[i]===c))return null;
+  if(spec.stones){
+    const pipes=shuffle(cells.map((c,i)=>i).filter(i=>cells[i].kind==="pipe"&&rot(cells[i].sol,1)!==cells[i].sol),r);
+    for(const i of pipes.slice(0,Math.max(1,Math.round(pipes.length*0.12))))cells[i].kind="stone";
+  }
+  const turn=cells.map((c,i)=>i).filter(i=>canTurn(cells[i])&&rot(cells[i].sol,1)!==cells[i].sol);
+  if(spec.scramble){
+    // the first gardens turn only a few tiles, so they teach the game
+    shuffle(turn,r);
+    for(const i of turn.slice(0,spec.scramble)){const c=cells[i],ks=[1,2,3].filter(q=>rot(c.sol,q)!==c.sol);c.mask=rot(c.sol,ks[Math.floor(r()*ks.length)]);}
+  }else for(const i of turn)cells[i].mask=rot(cells[i].sol,Math.floor(r()*4));
+  const L={spec,w,h,cells,moves:0,hints:0};
+  for(let guard=0;isSolved(L)&&guard<200;guard++){const i=turn[Math.floor(r()*turn.length)];if(i!=null)cells[i].mask=rot(cells[i].mask,1);}
+  if(isSolved(L))return null;
+  // par: the fewest clockwise turns that put every tile back the way it grew
+  L.par=cells.reduce((a,c)=>{if(!canTurn(c))return a;for(let q=0;q<4;q++)if(rot(c.mask,q)===c.sol)return a+q;return a;},0);
+  return L;
+}
+
+// the colour of water on every tile (0 = dry) and the fewest steps it took to get there (-1 = dry)
+function paint(L){
+  const n=L.w*L.h,col=new Array(n).fill(0),dist=new Array(n).fill(-1);
+  L.cells.forEach((c,s)=>{
+    if(c.kind!=="cloud")return;
+    const seen=new Set([s]),q=[[s,0]];
+    col[s]|=c.color;dist[s]=0;
+    while(q.length){
+      const [i,dd]=q.shift(),m=L.cells[i].mask;
+      for(const [d,j] of neighbours(L.w,L.h,i)){
+        if(!(m&d.b)||seen.has(j)||!(L.cells[j].mask&d.o))continue;
+        seen.add(j);col[j]|=c.color;if(dist[j]<0||dd+1<dist[j])dist[j]=dd+1;q.push([j,dd+1]);
+      }
+    }
+  });
+  return {col,dist};
+}
+function isSolved(L,p){p=p||paint(L);return L.cells.every((c,i)=>c.kind!=="flower"||p.col[i]===c.need);}
+// dir 1 = clockwise, -1 = back
+function tap(L,i,dir){const c=L.cells[i];if(!c||!canTurn(c))return false;c.mask=rot(c.mask,dir<0?3:1);L.moves++;return true;}
+function stars(L){const s=L.moves<=L.par?3:L.moves<=L.par*1.5+2?2:1;return L.hints?Math.min(s,2):s;}
+// a tile to turn next: one not yet the way it grew, beside the water if possible; -1 if none
+function hintTile(L,p){
+  p=p||paint(L);
+  const wrong=L.cells.map((c,i)=>i).filter(i=>canTurn(L.cells[i])&&L.cells[i].mask!==L.cells[i].sol);
+  const near=wrong.find(i=>neighbours(L.w,L.h,i).some(([d,j])=>(L.cells[i].sol&d.b)&&p.col[j]>0));
+  return near!=null?near:wrong.length?wrong[0]:-1;
+}
+
+function checkGarden(L,where,problems){
+  const spec=L.spec,cl=L.cells,live=cl.filter(c=>c.kind!=="hole").length,k=spec.colors;
+  if(cl.length!==L.w*L.h)problems.push(where+": wrong number of tiles");
+  const edges=cl.reduce((a,c)=>a+bits(c.sol),0)/2;
+  if(edges!==live-k)problems.push(where+": the solution is not "+k+" trees ("+edges+" links over "+live+" tiles)");
+  const clouds=cl.filter(c=>c.kind==="cloud").length;
+  if(clouds!==[1,2,4][k-1])problems.push(where+": "+clouds+" clouds for "+k+" colours");
+  const needs=[...new Set(cl.filter(c=>c.kind==="flower").map(c=>c.need))].sort().join(",");
+  if(needs!==[[BLUE],[RED,BLUE],[RED,BLUE,VIOLET]][k-1].join(","))problems.push(where+": flowers want "+needs);
+  if(spec.stones&&!cl.some(c=>c.kind==="stone"))problems.push(where+": no stones");
+  if(!spec.stones&&cl.some(c=>c.kind==="stone"))problems.push(where+": stones too early");
+  if(spec.holes!==cl.some(c=>c.kind==="hole"))problems.push(where+": gaps should be "+spec.holes);
+  if(isSolved(L))problems.push(where+": starts solved");
+  if(!(L.par>0))problems.push(where+": par is "+L.par);
+  if(hintTile(L)<0)problems.push(where+": no hint at the start");
+  cl.forEach((c,i)=>{
+    if(c.kind==="hole"){if(c.mask||c.sol)problems.push(where+": a gap has channels");return;}
+    if(c.mask<1||c.mask>15||bits(c.mask)!==bits(c.sol))problems.push(where+": bad tile "+i);
+    if(!canTurn(c)&&c.mask!==c.sol)problems.push(where+": a fixed tile "+i+" starts turned");
+    for(const d of DIRS){
+      if(!(c.sol&d.b))continue;
+      const x=i%L.w+d.dx,y=((i/L.w)|0)+d.dy;
+      if(x<0||y<0||x>=L.w||y>=L.h||cl[y*L.w+x].kind==="hole")problems.push(where+": tile "+i+" opens off the garden");
+    }
+  });
+  const fixed=cl.map((c,i)=>i).filter(i=>cl[i].kind==="cloud"||cl[i].kind==="stone");
+  for(const i of fixed){const m=cl[i].mask;if(tap(L,i,1)||cl[i].mask!==m)problems.push(where+": "+cl[i].kind+" "+i+" turned");}
+  // play the stored solution with taps only, as a player would
+  let taps=0;
+  cl.forEach((c,i)=>{if(!canTurn(c))return;for(let q=0;c.mask!==c.sol&&q<4;q++){tap(L,i,1);taps++;}if(c.mask!==c.sol)problems.push(where+": tile "+i+" cannot reach its solution");});
+  if(taps!==L.par)problems.push(where+": solved in "+taps+" turns, but par is "+L.par);
+  const p=paint(L);
+  if(!isSolved(L,p))problems.push(where+": the solution leaves a flower unhappy");
+  cl.forEach((c,i)=>{if(c.kind!=="hole"&&!p.col[i])problems.push(where+": the solution leaves tile "+i+" dry");});
+  if(stars(L)!==3)problems.push(where+": a par solve earns "+stars(L)+" stars");
+  if(hintTile(L,p)!==-1)problems.push(where+": a hint is still offered after the solve");
+  const f=cl.findIndex(c=>c.kind==="flower");
+  if(f>=0){const q={col:p.col.slice(),dist:p.dist};q.col[f]=cl[f].need===VIOLET?RED:VIOLET;if(isSolved(L,q))problems.push(where+": a flower in the wrong colour still counts");}
+}
+
+function selfTestLogic(){
+  const problems=[];
+  const specs=[[1,"cloud",1],[6,"stones",1],[9,"holes",1],[12,"colours",2],[16,"colours",3]];
+  for(const [n,,k] of specs)if(levelSpec(n).colors!==k)problems.push("garden "+n+" should have "+k+" colours");
+  if(!levelSpec(6).stones||levelSpec(5).stones||!levelSpec(9).holes||levelSpec(8).holes)problems.push("stones or gaps arrive at the wrong garden");
+  for(let n=1;n<=60;n++){
+    const where="garden "+n;
+    try{
+      const L=makeLevel(n);
+      if(JSON.stringify(L)!==JSON.stringify(makeLevel(n)))problems.push(where+": not the same garden twice");
+      if(n>1&&JSON.stringify(L.cells)===JSON.stringify(makeLevel(n-1).cells))problems.push(where+": same as the one before");
+      if(n===1&&(L.w!==3||L.h!==3||L.par>9))problems.push(where+": too hard for the first garden (par "+L.par+")");
+      checkGarden(L,where,problems);
+    }catch(err){problems.push(where+": "+(err&&err.stack||err));}
+  }
+  // following the hints alone must finish a garden in exactly par turns
+  for(const n of [1,2,5,6,9,12,16,21,33,47,58]){
+    try{
+      const L=makeLevel(n);let guard=0;
+      for(let i=hintTile(L);i>=0&&guard<600;i=hintTile(L),guard++)tap(L,i,1);
+      if(!isSolved(L))problems.push("garden "+n+": following the hints does not finish it");
+      if(L.moves!==L.par)problems.push("garden "+n+": following the hints takes "+L.moves+" turns, par is "+L.par);
+    }catch(err){problems.push("garden "+n+" (hints): "+(err&&err.stack||err));}
+  }
+  for(let d=14;d<=21;d++){
+    const day="2026-10-"+d;
+    try{
+      const L=makeDaily(day);
+      if(JSON.stringify(L)!==JSON.stringify(makeDaily(day)))problems.push("daily "+day+": not the same twice");
+      checkGarden(L,"daily "+day,problems);
+    }catch(err){problems.push("daily "+day+": "+(err&&err.stack||err));}
+  }
+  if(JSON.stringify(makeDaily("2026-10-14").cells)===JSON.stringify(makeDaily("2026-10-15").cells))problems.push("two days share a daily garden");
+  const S=(p,t)=>JSON.stringify(nextStreak(p,t));
+  if(S({date:"",streak:0},"2026-10-14")!==JSON.stringify({date:"2026-10-14",streak:1}))problems.push("first daily streak");
+  if(S({date:"2026-10-13",streak:4},"2026-10-14")!==JSON.stringify({date:"2026-10-14",streak:5}))problems.push("next-day streak");
+  if(S({date:"2026-10-14",streak:4},"2026-10-14")!==JSON.stringify({date:"2026-10-14",streak:4}))problems.push("same-day streak");
+  if(S({date:"2026-10-12",streak:4},"2026-10-14")!==JSON.stringify({date:"2026-10-14",streak:1}))problems.push("missed-day streak");
+  if(S({date:"2026-10-31",streak:2},"2026-11-01")!==JSON.stringify({date:"2026-11-01",streak:3}))problems.push("month-end streak");
+  const L=makeLevel(3);L.moves=L.par;L.hints=1;
+  if(stars(L)!==2)problems.push("a hint should cap the stars at 2");
+  L.hints=0;L.moves=L.par*3+5;
+  if(stars(L)!==1)problems.push("many extra turns should earn 1 star");
+  const c=L.cells.findIndex(canTurn),m=L.cells[c].mask;
+  tap(L,c,1);tap(L,c,-1);
+  if(L.cells[c].mask!==m)problems.push("turning back does not undo a turn");
+  return problems;
+}
+</script>
+
+<script>
+"use strict";
+// ---------- screen: 1280x720 landscape or 720x1280 portrait, letterboxed to any window or phone ----------
+const cv=document.getElementById("c");
+let g=cv.getContext("2d"),VW=W,VH=H;
+const view={scale:1,ox:0,oy:0},UI={panel:null,area:null,buttons:[]};
+const BUTTONS=[["hint","Hint"],["restart","Restart"],["levels","Gardens"],["daily","Daily"],["sound","Sound"]];
+function fit(){
+  const portrait=innerWidth<innerHeight*0.8;
+  VW=portrait?H:W;VH=portrait?W:H;
+  const dpr=Math.min(window.devicePixelRatio||1,2),s=Math.min(innerWidth/VW,innerHeight/VH);
+  view.scale=s;view.ox=(innerWidth-VW*s)/2;view.oy=(innerHeight-VH*s)/2;
+  cv.style.left=view.ox+"px";cv.style.top=view.oy+"px";cv.style.width=VW*s+"px";cv.style.height=VH*s+"px";
+  cv.width=Math.round(VW*s*dpr);cv.height=Math.round(VH*s*dpr);
+  g.setTransform(cv.width/VW,0,0,cv.height/VH,0,0);
+  layout();
+}
+function layout(){
+  const portrait=VW<VH;
+  UI.panel=portrait?{x:0,y:0,w:VW,h:230}:{x:0,y:0,w:300,h:VH};
+  UI.area=portrait?{x:20,y:310,w:VW-40,h:VH-350}:{x:320,y:80,w:VW-350,h:VH-110};
+  UI.buttons=BUTTONS.map(([id,label],k)=>portrait
+    ?{id,label,x:20+k*((VW-40)/5),y:150,w:(VW-40)/5-10,h:60}
+    :{id,label,x:30,y:290+k*70,w:240,h:56});
+}
+
+// ---------- look: five garden worlds, ten gardens each, then round again ----------
+const WORLDS=[
+  {name:"Meadow",sky:["#bfe3ff","#f1fbff"],hill:"#a6dc8a",tile:"#8fd46a",edge:"#76b955",dry:"#8a6a45",dryFill:"#c9a77a",stone:"#a3a8ad",ink:"#1d3b2a",soft:"#4d6b57",panel:"#ffffffb0"},
+  {name:"Orchard",sky:["#ffd9b8","#fff4e6"],hill:"#c9d98a",tile:"#a7d27a",edge:"#88b65c",dry:"#87603e",dryFill:"#c49f78",stone:"#b0a69a",ink:"#3b2a1d",soft:"#6b5947",panel:"#ffffffb0"},
+  {name:"Dunes",sky:["#ffe7a8","#fff8e0"],hill:"#ecd28f",tile:"#e9cf8f",edge:"#cfb06c",dry:"#9a7040",dryFill:"#d2b07c",stone:"#b9ab95",ink:"#47331a",soft:"#7a6240",panel:"#ffffffa8"},
+  {name:"Snowfield",sky:["#cfe0f2","#f5f9fd"],hill:"#e6eef7",tile:"#eef4fa",edge:"#cbd8e6",dry:"#7d8c9e",dryFill:"#b9c5d3",stone:"#9aa3ad",ink:"#1f2d3d",soft:"#56677a",panel:"#ffffffb8"},
+  {name:"Lantern Night",sky:["#1b2147","#3a3f74"],hill:"#2a3a4a",tile:"#4d7a5c",edge:"#3c6149",dry:"#5e4d3a",dryFill:"#8f7a60",stone:"#6f747c",ink:"#eef0ff",soft:"#b6bce0",panel:"#00000055"}];
+const WATER={1:"#ff5c6c",2:"#3d9bff",3:"#9b6bff"},PETAL={1:"#ff8a96",2:"#7cbcff",3:"#bb9bff"};
+const PENTA=[60,62,64,67,69,72,74,76],BLOOM={1:76,2:79,3:84};
+const midiHz=m=>440*Math.pow(2,(m-69)/12),easeOut=x=>1-Math.pow(1-Math.max(0,Math.min(1,x)),3);
+function worldOf(n){return WORLDS[Math.floor((Math.max(1,n)-1)/10)%WORLDS.length];}
+
+// ---------- progress: saved in this browser only ----------
+const SAVE_KEY="rainbloom.v1";
+const coverMode=location.hash==="#cover";
+let demo=location.hash==="#demo",noSave=demo,save=load();
+function load(){
+  const fresh={level:1,best:{},daily:{date:"",streak:0},mute:false};
+  try{
+    const s=JSON.parse(localStorage.getItem(SAVE_KEY)||"null");if(!s)return fresh;
+    return {level:Math.max(1,s.level|0),best:s.best&&typeof s.best==="object"?s.best:{},daily:s.daily&&s.daily.date?s.daily:fresh.daily,mute:!!s.mute};
+  }catch(e){return fresh;}
+}
+function store(){if(noSave)return;try{localStorage.setItem(SAVE_KEY,JSON.stringify(save));}catch(e){}}
+function today(){const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
+
+// ---------- audio: synthesized sounds (html-jam-kit); nothing starts before a click, touch or key ----------
+const audio=(()=>{
+  let ac=null,master=null,on=true;
+  function ensure(){
+    if(ac)return true;
+    try{ac=new (window.AudioContext||window.webkitAudioContext)();master=ac.createGain();master.gain.value=on?0.8:0;master.connect(ac.destination);return true;}catch(e){ac=null;return false;}
+  }
+  return{
+    unlock(){if(ensure()&&ac.state==="suspended"&&!document.hidden)ac.resume().catch(()=>{});},
+    started(){return !!ac;},
+    isOn(){return on;},
+    toggle(){on=!on;if(master)master.gain.value=on?0.8:0;return on;},
+    pause(hidden){if(!ac)return;try{hidden?ac.suspend():ac.resume();}catch(e){}},
+    tone(f,d,type,vol,delay){if(!ac)return;const t0=ac.currentTime+(delay||0),o=ac.createOscillator(),e=ac.createGain();o.type=type||"sine";o.frequency.value=f;e.gain.setValueAtTime(vol||0.08,t0);e.gain.exponentialRampToValueAtTime(0.0001,t0+d);o.connect(e);e.connect(master);o.start(t0);o.stop(t0+d+0.02);},
+    tune(notes,bpm,type,vol){if(!ac)return;let t=0;const beat=60/(bpm||120);for(const [n,b] of notes){if(n!=null)this.tone(midiHz(n),b*beat*0.9,type||"triangle",vol||0.05,t);t+=b*beat;}}
+  };
+})();
+document.addEventListener("visibilitychange",()=>audio.pause(document.hidden));
+
+// ---------- game state ----------
+const now=()=>performance.now()/1000;
+let L=null,P=null,cur={mode:"level",n:1},world=WORLDS[0],shown=[],pending=[],turnAnim=[],bloomAt=[];
+let won=false,solvedAt=0,celebrated=false,rainbowAt=0,quietUntil=0,overlay=null,levelsPage=0,banner="";
+let hint={i:-1,until:0},kb={on:false,i:0},hover=-1,mouse=null,parts=[],demoNext=0;
+
+function start(mode,n){
+  cur={mode,n};
+  if(mode==="daily"){L=makeDaily(today());world=WORLDS[L.seed%WORLDS.length];banner="Today's garden. A new one grows every day.";}
+  else{L=makeLevel(n);world=worldOf(n);banner=INTRO[n]||"";}
+  const t=now(),N=L.w*L.h;
+  P=paint(L);
+  shown=new Array(N).fill(0);
+  pending=P.col.map((c,i)=>c?{col:c,at:t+0.35+P.dist[i]*0.06}:null);
+  turnAnim=new Array(N).fill(0);bloomAt=new Array(N).fill(0);
+  won=false;solvedAt=0;celebrated=false;overlay=null;hint={i:-1,until:0};parts=[];quietUntil=t+1.5;
+  kb.i=L.cells.findIndex(canTurn);
+  document.body.style.background=world.sky[0];
+}
+function turn(i,dir){
+  if(won||overlay||i<0||!L.cells[i]||!tap(L,i,dir))return false;
+  turnAnim[i]+=dir<0?Math.PI/2:-Math.PI/2;
+  audio.tone(midiHz(PENTA[i%PENTA.length]),0.14,"triangle",0.05);
+  if(hint.i===i&&L.cells[i].mask===L.cells[i].sol)hint.i=-1;
+  afterTurn(i);
+  return true;
+}
+// water spreads out from the turned tile, one step every 50 ms
+function afterTurn(i){
+  const t=now(),np=paint(L),base=Math.max(0,np.dist[i]);
+  np.col.forEach((c,j)=>{
+    const was=pending[j]?pending[j].col:shown[j];
+    if(c===was)return;
+    if(!c){pending[j]=null;shown[j]=0;bloomAt[j]=0;return;}
+    pending[j]={col:c,at:t+Math.max(0,np.dist[j]-base)*0.05};
+  });
+  P=np;
+  if(isSolved(L,P))win();
+}
+function win(){
+  won=true;
+  let last=now();
+  for(const p of pending)if(p&&p.at>last)last=p.at;
+  solvedAt=last+0.4;
+  if(cur.mode==="level"){const k=String(cur.n);save.best[k]=Math.max(save.best[k]|0,stars(L));save.level=Math.max(save.level,cur.n+1);}
+  else save.daily=nextStreak(save.daily,today());
+  store();
+}
+function useHint(){
+  if(won||overlay)return;
+  const i=hintTile(L,P);if(i<0)return;
+  L.hints++;hint={i,until:now()+3};kb.i=i;
+  audio.tone(880,0.15,"sine",0.04);
+}
+function act(id){
+  audio.tone(523,0.06,"sine",0.04);
+  if(id==="hint")useHint();
+  else if(id==="restart"||id==="again")start(cur.mode,cur.n);
+  else if(id==="levels"){overlay=overlay==="levels"?null:"levels";levelsPage=Math.floor((save.level-1)/30);}
+  else if(id==="daily")start("daily",0);
+  else if(id==="sound"){audio.toggle();save.mute=!audio.isOn();store();}
+  else if(id==="next")start("level",cur.mode==="daily"?save.level:cur.n+1);
+  else if(id==="prev")levelsPage=Math.max(0,levelsPage-1);
+  else if(id==="more")levelsPage=Math.min(Math.floor((save.level-1)/30),levelsPage+1);
+  else if(id==="close")overlay=null;
+  else if(id.startsWith("lv"))start("level",+id.slice(2));
+}
+
+// ---------- geometry of boards and panels ----------
+const inside=(b,x,y)=>x>=b.x&&y>=b.y&&x<b.x+b.w&&y<b.y+b.h;
+function boardGeom(){const a=UI.area,ts=Math.floor(Math.min(a.w/L.w,a.h/L.h,128));return {ts,bx:Math.round(a.x+(a.w-ts*L.w)/2),by:Math.round(a.y+(a.h-ts*L.h)/2)};}
+function tileCentre(i){const {ts,bx,by}=boardGeom();return [bx+(i%L.w+0.5)*ts,by+(((i/L.w)|0)+0.5)*ts];}
+function tileAt(x,y){if(!L)return -1;const {ts,bx,by}=boardGeom(),tx=Math.floor((x-bx)/ts),ty=Math.floor((y-by)/ts);return tx<0||ty<0||tx>=L.w||ty>=L.h?-1:ty*L.w+tx;}
+function winBox(){const a=UI.area,w=Math.min(a.w-20,540),h=300;return {x:a.x+(a.w-w)/2,y:a.y+(a.h-h)/2,w,h};}
+function winButtons(){
+  const b=winBox();
+  return [{id:"next",label:cur.mode==="daily"?"Back to gardens":"Next garden ▶",x:b.x+30,y:b.y+b.h-84,w:b.w*0.58-30,h:56,primary:true},
+          {id:"again",label:"Play again",x:b.x+b.w*0.58+10,y:b.y+b.h-84,w:b.w*0.42-40,h:56}];
+}
+function levelsBox(){const w=Math.min(VW-60,760),h=Math.min(VH-60,560);return {x:(VW-w)/2,y:(VH-h)/2,w,h};}
+function slotRect(k){const b=levelsBox(),cw=(b.w-60)/6,ch=(b.h-170)/5;return {x:b.x+30+(k%6)*cw,y:b.y+75+Math.floor(k/6)*ch,w:cw-10,h:ch-10};}
+function navButtons(){const b=levelsBox(),y=b.y+b.h-78,w=(b.w-80)/3;return [{id:"prev",label:"◀ Back",x:b.x+30,y,w,h:52},{id:"close",label:"Close",x:b.x+40+w,y,w,h:52},{id:"more",label:"More ▶",x:b.x+50+2*w,y,w,h:52}];}
+function overlayButtons(){const out=[];for(let k=0;k<30;k++){const n=levelsPage*30+k+1;if(n<=save.level)out.push(Object.assign({id:"lv"+n},slotRect(k)));}return out.concat(navButtons());}
+
+// ---------- input: mouse, touch and pen through pointer events, plus keys ----------
+function toLogical(e){return [(e.clientX-view.ox)/view.scale,(e.clientY-view.oy)/view.scale];}
+function press(x,y,dir){
+  kb.on=false;
+  if(demo)return;
+  if(overlay){for(const b of overlayButtons())if(inside(b,x,y)){act(b.id);return;}if(!inside(levelsBox(),x,y))overlay=null;return;}
+  if(won){if(now()>=solvedAt)for(const b of winButtons())if(inside(b,x,y)){act(b.id);return;}}
+  for(const b of UI.buttons)if(inside(b,x,y)){act(b.id);return;}
+  turn(tileAt(x,y),dir);
+}
+addEventListener("pointerdown",e=>{if(coverMode)return;audio.unlock();const [x,y]=toLogical(e);mouse={x,y};press(x,y,e.button===2?-1:1);e.preventDefault();},{passive:false});
+addEventListener("pointermove",e=>{const [x,y]=toLogical(e);mouse={x,y};hover=e.pointerType==="mouse"?tileAt(x,y):-1;});
+addEventListener("contextmenu",e=>{if(!coverMode)e.preventDefault();});
+addEventListener("keydown",e=>{
+  audio.unlock();
+  if(e.key==="m"||e.key==="M"){audio.toggle();save.mute=!audio.isOn();store();return;}
+  if(demo||!L)return;
+  const k=e.key;
+  if(k===" "||k.startsWith("Arrow"))e.preventDefault();
+  if(won){if(now()>=solvedAt&&(k===" "||k==="Enter"))act("next");return;}
+  if(overlay)return;
+  if(k==="h"||k==="H")useHint();
+  else if(k==="r"||k==="R")act("restart");
+  else if(k.startsWith("Arrow")){kb.on=true;moveCursor(k);}
+  else if(k===" "||k==="Enter"){kb.on=true;turn(kb.i,e.shiftKey?-1:1);}
+});
+addEventListener("resize",fit);
+function moveCursor(k){
+  const d={ArrowUp:[0,-1],ArrowDown:[0,1],ArrowLeft:[-1,0],ArrowRight:[1,0]}[k];if(!d)return;
+  let x=kb.i%L.w,y=(kb.i/L.w)|0;
+  for(let s=0;s<Math.max(L.w,L.h);s++){x+=d[0];y+=d[1];if(x<0||y<0||x>=L.w||y>=L.h)return;if(L.cells[y*L.w+x].kind!=="hole"){kb.i=y*L.w+x;return;}}
+}
+
+// ---------- drawing ----------
+function rr(x,y,w,h,r){g.beginPath();g.moveTo(x+r,y);g.arcTo(x+w,y,x+w,y+h,r);g.arcTo(x+w,y+h,x,y+h,r);g.arcTo(x,y+h,x,y,r);g.arcTo(x,y,x+w,y,r);g.closePath();}
+function wrap(text,maxW){const lines=[];let line="";for(const w of text.split(" ")){const t=line?line+" "+w:w;if(g.measureText(t).width>maxW&&line){lines.push(line);line=w;}else line=t;}if(line)lines.push(line);return lines;}
+function star(x,y,r,fill){g.beginPath();for(let k=0;k<10;k++){const a=-Math.PI/2+k*Math.PI/5,d=k%2?r*0.45:r;g.lineTo(x+Math.cos(a)*d,y+Math.sin(a)*d);}g.closePath();if(fill){g.fillStyle="#ffc93c";g.fill();}g.strokeStyle="#c98f00";g.lineWidth=2;g.stroke();}
+function drawStars(cx,cy,n,r){for(let k=0;k<3;k++)star(cx+(k-1)*r*3,cy,r,k<n);}
+function drawSky(w,h,wd,t){
+  const gr=g.createLinearGradient(0,0,0,h);gr.addColorStop(0,wd.sky[0]);gr.addColorStop(1,wd.sky[1]);g.fillStyle=gr;g.fillRect(0,0,w,h);
+  if(wd.name==="Lantern Night")for(let k=0;k<40;k++){g.fillStyle="rgba(255,255,230,"+(0.35+0.3*Math.sin(t*1.5+k)).toFixed(3)+")";g.fillRect((k*137.5)%w,(k*71.3)%(h*0.6),2,2);}
+  g.fillStyle=wd.hill;g.beginPath();g.moveTo(0,h);
+  for(let x=0;x<=w+20;x+=20)g.lineTo(x,h*0.84+Math.sin(x/170+1.3)*h*0.04+Math.sin(x/61)*h*0.012);
+  g.lineTo(w,h);g.closePath();g.fill();
+}
+function drawRainbow(t){
+  const a=UI.area,k=Math.min(1,(t-rainbowAt)/1.2),cx=a.x+a.w/2,cy=a.y+a.h*0.95,R=Math.min(a.w,a.h*1.6)*0.5;
+  g.lineWidth=10;
+  ["#ff5a5a","#ffa04a","#ffe45a","#6ee06e","#5ab4ff","#9a7cff"].forEach((c,q)=>{g.strokeStyle=c;g.globalAlpha=0.55*k;g.beginPath();g.arc(cx,cy,R-q*10,Math.PI,Math.PI+Math.PI*k);g.stroke();});
+  g.globalAlpha=1;
+}
+function drawTile(c,x,y,ts,col,ang,t,i){
+  if(c.kind==="hole")return;
+  const s=ts*0.9,k=ts/100;
+  g.fillStyle="rgba(0,0,0,0.13)";rr(x-s/2,y-s/2+ts*0.05,s,s,ts*0.16);g.fill();
+  g.fillStyle=c.kind==="stone"?world.stone:world.tile;rr(x-s/2,y-s/2,s,s,ts*0.16);g.fill();
+  g.strokeStyle=world.edge;g.lineWidth=Math.max(1,3*k);g.stroke();
+  if(c.kind==="stone"){g.fillStyle="rgba(0,0,0,0.22)";for(const [dx,dy] of [[-1,-1],[1,-1],[-1,1],[1,1]]){g.beginPath();g.arc(x+dx*s*0.37,y+dy*s*0.37,3.5*k,0,7);g.fill();}}
+  // the channel turns with the tile; ang eases each turn in
+  g.save();g.translate(x,y);g.rotate(ang);g.lineCap="butt";
+  for(const [style,wid] of [[world.dry,31*k],[col?WATER[col]:world.dryFill,24*k]]){
+    g.strokeStyle=style;g.fillStyle=style;g.lineWidth=wid;
+    for(const d of DIRS)if(c.mask&d.b){g.beginPath();g.moveTo(0,0);g.lineTo(d.dx*ts*0.5,d.dy*ts*0.5);g.stroke();}
+    g.beginPath();g.arc(0,0,wid/2,0,7);g.fill();
+  }
+  if(col){g.fillStyle="rgba(255,255,255,0.5)";const f=((t*0.9+i*0.37)%1)*ts*0.5;for(const d of DIRS)if(c.mask&d.b){g.beginPath();g.arc(d.dx*f,d.dy*f,3*k,0,7);g.fill();}}
+  g.restore();
+  if(c.kind==="cloud"){
+    g.fillStyle=WATER[c.color];
+    for(let d=0;d<3;d++){const fy=(t*0.9+d/3)%1;g.globalAlpha=1-fy;g.fillRect(x+(d-1)*15*k-1.5*k,y+8*k+fy*28*k,3*k,9*k);}
+    g.globalAlpha=1;g.fillStyle="#ffffff";
+    for(const [dx,dy,r] of [[-16,0,15],[0,-8,19],[16,-1,14],[1,5,15]]){g.beginPath();g.arc(x+dx*k,y+dy*k,r*k,0,7);g.fill();}
+    g.fillStyle=WATER[c.color];g.beginPath();g.arc(x,y-2*k,7*k,0,Math.PI);g.lineTo(x,y-14*k);g.closePath();g.fill();
+  }else if(c.kind==="flower"){
+    const need=c.need,state=!col?"dry":col===need?"bloom":"wrong";
+    g.fillStyle="#3f8f3a";g.beginPath();g.arc(x,y,13*k,0,7);g.fill();
+    if(state==="bloom"){
+      const R=(14+12*easeOut((t-bloomAt[i])/0.5))*k;
+      g.fillStyle=PETAL[need];
+      for(let p=0;p<6;p++){const a=p*Math.PI/3+t*0.3;g.beginPath();g.arc(x+Math.cos(a)*R*0.75,y+Math.sin(a)*R*0.75,R*0.55,0,7);g.fill();}
+      g.fillStyle="#ffd84a";g.beginPath();g.arc(x,y,R*0.42,0,7);g.fill();
+    }else{
+      // a closed bud ringed in the colour it wants; it droops when the wrong rain reaches it
+      g.save();g.translate(x,y);g.rotate(state==="wrong"?0.55+0.08*Math.sin(t*6):0);
+      g.fillStyle=state==="wrong"?"#9a8a78":PETAL[need];
+      g.beginPath();g.ellipse(0,-6*k,10*k,15*k,0,0,7);g.fill();
+      g.strokeStyle=WATER[need];g.lineWidth=3.5*k;g.stroke();
+      g.restore();
+    }
+  }
+}
+function drawRing(i,t,ts){
+  const [x,y]=tileCentre(i),p=0.5+0.5*Math.sin(t*6);
+  g.strokeStyle="rgba(255,200,40,"+(0.6+0.4*p).toFixed(3)+")";g.lineWidth=5;
+  rr(x-ts*0.48,y-ts*0.48,ts*0.96,ts*0.96,ts*0.18);g.stroke();
+  // a small clockwise arrow
+  const R=ts*0.36,a=-Math.PI*0.2,ex=x+Math.cos(a)*R,ey=y+Math.sin(a)*R;
+  g.beginPath();g.arc(x,y,R,-Math.PI*0.85,a);g.stroke();
+  g.fillStyle=g.strokeStyle;g.beginPath();g.moveTo(ex+ts*0.07,ey-ts*0.02);g.lineTo(ex-ts*0.06,ey-ts*0.08);g.lineTo(ex-ts*0.02,ey+ts*0.08);g.closePath();g.fill();
+}
+function reveal(i,col,t){
+  shown[i]=col;const c=L.cells[i];
+  if(c.kind!=="flower")return;
+  const loud=t>quietUntil;
+  if(col===c.need){bloomAt[i]=t;if(loud)audio.tone(midiHz(BLOOM[col]),0.5,"sine",0.06);burst(i,col,6);}
+  else{bloomAt[i]=0;if(loud)audio.tone(110,0.18,"square",0.02);}
+}
+function drawBoard(t,dt){
+  const {ts}=boardGeom();
+  L.cells.forEach((c,i)=>{
+    const p=pending[i];if(p&&t>=p.at){pending[i]=null;reveal(i,p.col,t);}
+    turnAnim[i]*=Math.exp(-dt*16);if(Math.abs(turnAnim[i])<0.002)turnAnim[i]=0;
+    const [x,y]=tileCentre(i);
+    drawTile(c,x,y,ts,shown[i],turnAnim[i],t,i);
+  });
+  if(won)return;
+  if(!demo){
+    if(hover>=0&&L.cells[hover]&&canTurn(L.cells[hover])){const [x,y]=tileCentre(hover);g.fillStyle="rgba(255,255,255,0.2)";rr(x-ts*0.45,y-ts*0.45,ts*0.9,ts*0.9,ts*0.16);g.fill();}
+    if(kb.on&&kb.i>=0){const [x,y]=tileCentre(kb.i);g.strokeStyle="#1d6fd8";g.lineWidth=5;rr(x-ts*0.47,y-ts*0.47,ts*0.94,ts*0.94,ts*0.17);g.stroke();}
+  }
+  const guide=hint.i>=0&&t<hint.until?hint.i:(cur.mode==="level"&&cur.n===1&&!demo)?hintTile(L,P):-1;
+  if(guide>=0)drawRing(guide,t,ts);
+}
+function drawButton(b,label,primary){
+  const hot=mouse&&inside(b,mouse.x,mouse.y);
+  g.fillStyle=primary?(hot?"#47ad58":"#3f9b4f"):(hot?"#ffffff":"#ffffffd8");rr(b.x,b.y,b.w,b.h,14);g.fill();
+  g.strokeStyle=primary?"#2c7a3a":"#00000022";g.lineWidth=2;g.stroke();
+  g.fillStyle=primary?"#ffffff":"#1d2b22";g.font="600 "+(b.w<160?20:24)+"px system-ui,sans-serif";g.textAlign="center";g.textBaseline="middle";
+  g.fillText(label,b.x+b.w/2,b.y+b.h/2+1);g.textBaseline="alphabetic";
+}
+function buttonLabel(b){
+  if(b.id==="sound")return audio.isOn()?"Sound: on":"Sound: off";
+  if(b.id==="daily")return save.daily.date===today()?"Daily ✓ "+save.daily.streak:"Daily";
+  return b.label;
+}
+function drawPanel(){
+  const p=UI.panel,portrait=VW<VH,cx=p.x+p.w/2;
+  g.fillStyle=world.panel;rr(p.x+10,p.y+10,p.w-20,p.h-20,18);g.fill();
+  g.textAlign="center";g.fillStyle=world.ink;g.font="bold 46px system-ui,sans-serif";g.fillText("Rainbloom",cx,portrait?64:80);
+  const name=cur.mode==="daily"?"Daily garden":"Garden "+cur.n,best=cur.mode==="level"?(save.best[String(cur.n)]|0):0,status="Turns "+L.moves+" · par "+L.par;
+  if(portrait){
+    g.font="600 26px system-ui,sans-serif";g.fillText(name+"  ·  "+world.name,cx,104);
+    g.font="22px system-ui,sans-serif";g.fillStyle=world.soft;g.fillText(status,cx,136);
+    g.font="15px system-ui,sans-serif";g.fillText("Made by MV2 of Munim, Inc. with AI agents",VW/2,VH-16);
+  }else{
+    g.font="600 28px system-ui,sans-serif";g.fillText(name,cx,134);
+    g.font="20px system-ui,sans-serif";g.fillStyle=world.soft;g.fillText(world.name,cx,162);
+    drawStars(cx,202,best,15);
+    g.fillStyle=world.ink;g.font="22px system-ui,sans-serif";g.fillText(status,cx,256);
+    g.font="15px system-ui,sans-serif";g.fillStyle=world.soft;
+    g.fillText("Click: turn · Right-click: turn back",cx,VH-62);g.fillText("Arrows + Space · H hint · M sound",cx,VH-40);
+    g.fillText("Made by MV2 of Munim, Inc. with AI agents",cx,VH-18);
+  }
+  for(const b of UI.buttons)drawButton(b,buttonLabel(b),false);
+}
+function drawBanner(){
+  if(!banner||won)return;
+  const portrait=VW<VH,a=UI.area;
+  g.font="600 22px system-ui,sans-serif";
+  const lines=wrap(banner,a.w-60).slice(0,2),w=Math.min(a.w,Math.max(...lines.map(l=>g.measureText(l).width))+40),h=lines.length*28+16;
+  const x=a.x+(a.w-w)/2,y=portrait?236:Math.max(6,a.y-h-8);
+  g.fillStyle="rgba(255,255,255,0.88)";rr(x,y,w,h,14);g.fill();
+  g.fillStyle="#1d3b2a";g.textAlign="center";
+  lines.forEach((l,q)=>g.fillText(l,a.x+a.w/2,y+30+q*28));
+}
+function drawWin(){
+  const b=winBox(),cx=b.x+b.w/2;
+  g.fillStyle="rgba(255,255,255,0.95)";rr(b.x,b.y,b.w,b.h,22);g.fill();
+  g.fillStyle="#1d3b2a";g.textAlign="center";g.font="bold 36px system-ui,sans-serif";
+  g.fillText(cur.mode==="daily"?"Today's garden blooms!":"Garden "+cur.n+" blooms!",cx,b.y+58);
+  drawStars(cx,b.y+112,stars(L),24);
+  g.font="22px system-ui,sans-serif";g.fillStyle="#4d6b57";
+  const n=save.daily.streak;
+  g.fillText(cur.mode==="daily"?"Daily streak: "+n+(n===1?" day":" days")+". See you tomorrow!":"Turns "+L.moves+" · par "+L.par+(L.hints?" · hint used":""),cx,b.y+172);
+  for(const btn of winButtons())drawButton(btn,btn.label,btn.primary);
+}
+function drawLevels(){
+  const b=levelsBox();
+  g.fillStyle="rgba(0,0,0,0.35)";g.fillRect(0,0,VW,VH);
+  g.fillStyle="#fffffff2";rr(b.x,b.y,b.w,b.h,22);g.fill();
+  g.fillStyle="#1d3b2a";g.textAlign="center";g.font="bold 32px system-ui,sans-serif";
+  g.fillText("Gardens "+(levelsPage*30+1)+"–"+(levelsPage*30+30),b.x+b.w/2,b.y+50);
+  for(let k=0;k<30;k++){
+    const n=levelsPage*30+k+1,r=slotRect(k),open=n<=save.level;
+    g.fillStyle=!open?"#e2e2e2":n===cur.n&&cur.mode==="level"?"#d4f2c4":"#eef6ea";rr(r.x,r.y,r.w,r.h,12);g.fill();
+    g.fillStyle=open?"#1d3b2a":"#9a9a9a";g.font="600 24px system-ui,sans-serif";g.fillText(String(n),r.x+r.w/2,r.y+r.h*0.48);
+    if(open){const s=save.best[String(n)]|0;for(let q=0;q<3;q++)star(r.x+r.w/2+(q-1)*16,r.y+r.h*0.76,6,q<s);}
+  }
+  for(const btn of navButtons())drawButton(btn,btn.label,false);
+}
+function burst(i,col,count){
+  const [x,y]=tileCentre(i);
+  for(let k=0;k<count;k++){const a=Math.random()*Math.PI*2,v=60+Math.random()*120;parts.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v-80,life:1,col:PETAL[col]});}
+  if(parts.length>300)parts.splice(0,parts.length-300);
+}
+function drawParts(dt){
+  for(const p of parts){p.life-=dt*0.8;p.vy+=160*dt;p.x+=p.vx*dt;p.y+=p.vy*dt;}
+  parts=parts.filter(p=>p.life>0);
+  for(const p of parts){g.globalAlpha=Math.max(0,Math.min(1,p.life));g.fillStyle=p.col;g.beginPath();g.ellipse(p.x,p.y,6,3.5,p.life*6,0,7);g.fill();}
+  g.globalAlpha=1;
+}
+function celebrate(t){
+  celebrated=true;rainbowAt=t;
+  audio.tune([[72,0.5],[76,0.5],[79,0.5],[84,1.5]],300,"triangle",0.05);
+  L.cells.forEach((c,i)=>{if(c.kind==="flower")burst(i,c.need,8);});
+}
+function draw(t,dt){
+  drawSky(VW,VH,world,t);
+  const done=won&&t>=solvedAt;
+  if(done){if(!celebrated)celebrate(t);drawRainbow(t);}
+  drawPanel();
+  drawBoard(t,dt);
+  drawBanner();
+  drawParts(dt);
+  if(done&&!demo)drawWin();
+  if(overlay==="levels")drawLevels();
+}
+// #demo: plays itself from garden 16 for store videos; it never saves
+function demoStep(t){
+  if(won){if(t>=solvedAt+2.5)start("level",cur.n+1);return;}
+  if(t<demoNext)return;
+  demoNext=t+0.3;
+  const i=hintTile(L,P);if(i>=0){turn(i,1);hint={i,until:t+0.3};}
+}
+let lastMs=performance.now();
+function frame(ms){
+  const dt=Math.min(Math.max((ms-lastMs)/1000,0),0.1);lastMs=ms;
+  const t=now();
+  if(demo)demoStep(t);
+  draw(t,dt);
+  requestAnimationFrame(frame);
+}
+
+// ---------- #cover: the three store covers as images (right-click, Save image as) ----------
+function renderCover(cw,ch){
+  const c=document.createElement("canvas");c.width=cw;c.height=ch;
+  const keep=[g,VW,VH,UI.area,L,P,shown,pending,turnAnim,bloomAt,world,won,rainbowAt];
+  try{
+    g=c.getContext("2d");VW=cw;VH=ch;
+    L=makeLevel(16);world=WORLDS[0];won=true;   // won: no hover, cursor or hint ring on the cover
+    for(const cell of L.cells)cell.mask=cell.sol;
+    P=paint(L);shown=P.col.slice();pending=shown.map(()=>null);turnAnim=shown.map(()=>0);bloomAt=shown.map(()=>-10);
+    UI.area={x:cw*0.08,y:ch*0.30,w:cw*0.84,h:ch*0.64};rainbowAt=-10;
+    drawSky(cw,ch,world,1);drawRainbow(5);
+    drawBoard(5,0);
+    const size=Math.round(Math.min(cw,ch)*0.13);
+    g.textAlign="center";g.font="bold "+size+"px system-ui,sans-serif";g.lineJoin="round";
+    g.lineWidth=size*0.14;g.strokeStyle="#ffffff";g.strokeText("Rainbloom",cw/2,ch*0.22);
+    g.fillStyle="#2a6b3a";g.fillText("Rainbloom",cw/2,ch*0.22);
+    return c.toDataURL("image/png");
+  }finally{[g,VW,VH,UI.area,L,P,shown,pending,turnAnim,bloomAt,world,won,rainbowAt]=keep;}
+}
+
+// ---------- #selftest: the rules, then every screen through the real drawing code ----------
+function selfTest(){
+  const t0=performance.now(),problems=selfTestLogic(),kept=JSON.stringify(save);
+  noSave=true;
+  try{
+    for(const n of [1,6,9,12,16,31,45]){
+      start("level",n);
+      for(let f=0;f<20;f++)draw(now()+f*0.1,0.1);
+      let guard=0;
+      for(let i=hintTile(L,P);i>=0&&guard<600;i=hintTile(L,P),guard++)turn(i,1);
+      if(!won)problems.push("page: garden "+n+" is not won by following the hints");
+      for(let f=0;f<30;f++)draw(now()+3+f*0.1,0.1);
+    }
+    start("daily",0);
+    for(let i=hintTile(L,P),guard=0;i>=0&&guard<600;i=hintTile(L,P),guard++)turn(i,1);
+    if(!won||save.daily.streak<1)problems.push("page: the daily garden does not count");
+    draw(now()+5,0.1);
+    overlay="levels";draw(now(),0.016);overlay=null;
+    const keepV=[VW,VH];VW=H;VH=W;layout();start("level",12);draw(now()+2,0.1);[VW,VH]=keepV;layout();
+    if(!/^data:image\/png/.test(renderCover(320,180)))problems.push("page: the cover did not render");
+  }catch(err){problems.push("page: "+(err&&err.stack||err));}
+  save=JSON.parse(kept);noSave=demo;
+  if(audio.started())problems.push("audio started without a click, touch or key");
+  return {problems,ms:Math.round(performance.now()-t0)};
+}
+
+fit();
+start("level",Math.max(1,save.level));
+if(save.mute)audio.toggle();
+if(location.hash==="#selftest"){
+  const r=selfTest(),box=document.getElementById("test");box.hidden=false;
+  box.textContent=`Rainbloom self-test (v0.1.0): ${r.ms} ms.\n`+(r.problems.length?`${r.problems.length} problem(s):\n`+r.problems.slice(0,40).join("\n"):"No problems found.")+"\n\nClick to close.";
+  box.onclick=()=>{box.hidden=true;location.hash="";};
+  console.log("self-test:",r.problems.length,"problems",r.problems);
+  start("level",Math.max(1,save.level));
+}else if(coverMode){
+  const box=document.getElementById("covers");box.hidden=false;
+  box.textContent="Rainbloom store covers. Right-click each image and choose 'Save image as'.\n";
+  for(const [name,w,h] of [["landscape-1920x1080",1920,1080],["portrait-800x1200",800,1200],["square-800x800",800,800]]){
+    const cap=document.createElement("div");cap.textContent="rainbloom-"+name+".png";box.appendChild(cap);
+    const img=document.createElement("img");img.alt=name;img.src=renderCover(w,h);box.appendChild(img);
+  }
+}
+if(demo){document.body.classList.add("demo");start("level",16);}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
