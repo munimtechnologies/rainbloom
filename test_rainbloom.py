@@ -72,6 +72,8 @@ globalThis.location={hash:__HASH__};
 const __ls=new Map();
 Object.defineProperty(globalThis,"localStorage",{value:{getItem:k=>__ls.has(k)?__ls.get(k):null,setItem:(k,v)=>__ls.set(k,String(v))},configurable:true,writable:true});
 globalThis.AudioContext=__any;
+// true when the bloom panel and the garden do not overlap
+function __winClear(){const b=boardGeom(),w=winBox(),bw=b.ts*L.w,bh=b.ts*L.h;return w.x+w.w<=b.bx||b.bx+bw<=w.x||w.y+w.h<=b.by||b.by+bh<=w.y;}
 """
 
 AFTER = {
@@ -87,11 +89,14 @@ __key("m");__out.muted=save.mute===true;__key("M");__out.unmuted=save.mute===fal
 for(let k=0;k<200&&!won;k++){const [x,y]=tileCentre(hintTile(L,P));__clickL(x,y);__frames(1,0.016);}
 __out.won1=won;
 __frames(120,0.05);
+__out.winClear=__winClear();
+const __rs=UI.buttons.find(b=>b.id==="restart");__clickL(__rs.x+5,__rs.y+5);
+__out.boxBlocks=won&&cur.n===1;
 const __nb=winButtons()[0];__clickL(__nb.x+5,__nb.y+5);
 __out.after=cur.n;
 const __s1=JSON.parse(__ls.get("rainbloom.v1"));
 __out.saved=__s1.level;__out.best1=__s1.best["1"];
-__key("ArrowRight");__key("ArrowDown");
+kb.i=0;__key("ArrowRight");__key("ArrowDown");__out.arrows=kb.on&&kb.i===1+L.w;
 kb.i=L.cells.findIndex(canTurn);const __m0=L.moves;__key(" ");__out.keyTurn=L.moves===__m0+1;
 const __hb=UI.buttons.find(b=>b.id==="hint");const __h0=L.hints;__clickL(__hb.x+5,__hb.y+5);__out.hint=L.hints===__h0+1;
 __frames(10,0.05);
@@ -109,6 +114,7 @@ __frames(100,0.05);
 __out.streak=JSON.parse(__ls.get("rainbloom.v1")).daily.streak;
 globalThis.innerWidth=390;globalThis.innerHeight=844;__fire("resize",{});__frames(3,0.016);
 __out.portrait=VW===720&&VH===1280;
+__out.winClearPortrait=__winClear();
 const __nb2=winButtons()[0];__clickL(__nb2.x+5,__nb2.y+5);__out.backToGardens=cur.mode==="level"&&cur.n===2;
 const __pm=L.moves,__pi=L.cells.findIndex(canTurn);const [__px,__py]=tileCentre(__pi);__clickL(__px,__py);__out.portraitTurn=L.moves===__pm+1;
 __frames(30,0.05);
@@ -178,10 +184,16 @@ class Static(unittest.TestCase):
         self.assertIn('SAVE_KEY="rainbloom.v1"', PAGE)
         self.assertRegex(PAGE, r"localStorage\.setItem\(SAVE_KEY")
 
+    def test_credit_is_readable_at_800x450(self):
+        # 800x450 shows the 1280x720 canvas at 0.625 scale; 24 px logical is 15 px on screen
+        self.assertGreaterEqual(int(re.search(r"const FOOT_PX=(\d+);", PAGE).group(1)) * 800 / 1280, 15)
+        self.assertEqual(PAGE.count('g.font=FOOT_PX+"px system-ui,sans-serif"'), 2)
+
     def test_selftest_cover_and_demo_hooks(self):
         self.assertIn('location.hash==="#selftest"', PAGE)
         self.assertIn('location.hash==="#cover"', PAGE)
         self.assertIn('location.hash==="#demo"', PAGE)
+        self.assertIn("self-test (v0.1.1)", PAGE)
 
     def test_disclosure_licence_and_wording(self):
         self.assertIn("Made by MV2 of Munim, Inc. with AI agents", HTML)
@@ -216,8 +228,9 @@ class Node(unittest.TestCase):
 
     def test_page_play(self):
         r = run_page("")
-        for key in ("lands", "muted", "unmuted", "won1", "keyTurn", "hint", "restart", "levelsOpen", "picked",
-                    "back", "daily", "dailyWon", "portrait", "backToGardens", "portraitTurn"):
+        for key in ("lands", "muted", "unmuted", "won1", "winClear", "boxBlocks", "arrows", "keyTurn", "hint",
+                    "restart", "levelsOpen", "picked", "back", "daily", "dailyWon", "portrait", "winClearPortrait",
+                    "backToGardens", "portraitTurn"):
             self.assertTrue(r.get(key), "%s failed: %r" % (key, r))
         self.assertEqual(r["after"], 2, r)
         self.assertEqual(r["saved"], 2, r)

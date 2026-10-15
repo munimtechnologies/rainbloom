@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>Rainbloom</title>
-<!-- Rainbloom v0.1.0 (Apache-2.0), by MV2 of Munim, Inc., made with AI agents. Built on html-jam-kit: one self-contained HTML file. -->
+<!-- Rainbloom v0.1.1 (Apache-2.0), by MV2 of Munim, Inc., made with AI agents. Built on html-jam-kit: one self-contained HTML file. -->
 <style>
 html,body{margin:0;height:100%;overflow:hidden;background:#bfe3ff;touch-action:none;user-select:none;-webkit-user-select:none}
 canvas{display:block;position:absolute}
@@ -44,13 +44,15 @@ const INTRO={1:"Tap a tile to turn it. Bring the rain to every flower.",
 
 // what garden n brings: size, how many tiles start turned (0 = all), stones, gaps and colours
 // colours: 1 = one blue tree; 2 = a red and a blue tree that must not meet; 3 = also a violet tree fed by both
+// The first eight gardens turn only some tiles, and each new kind of rain (12, 16) starts in a smaller garden
+// with about 60% of its tiles turned, so the step up is gentle (playtest, 2026-10-14).
 function levelSpec(n){
   n=Math.max(1,Math.floor(n)||1);
-  const SIZES=[[3,3],[3,3],[4,3],[4,4],[5,4],[5,5],[5,5],[6,5],[6,5],[6,6],[6,6],[6,5],[6,6],[7,6],[7,6],[6,6],[7,6],[7,7],[7,7],[8,6]];
+  const SIZES=[[3,3],[3,3],[4,3],[4,4],[5,4],[5,5],[5,5],[6,5],[6,5],[6,6],[6,6],[5,4],[5,5],[6,5],[6,5],[6,5],[6,5],[7,6],[7,7],[8,6]];
   const [w,h]=n<=SIZES.length?SIZES[n-1]:n<=30?[8,7]:n<=50?[9,7]:[10,8];
   let colors=n<12?1:n<16?2:3;
   if(n>20)colors=[1,2,3,3,2,3][n%6];
-  return {n,w,h,scramble:n<=4?[2,3,5,8][n-1]:0,stones:n>=6,holes:n>=9,colors};
+  return {n,w,h,scramble:n<=8?[2,3,5,8,11,14,18,22][n-1]:0,share:n===12||n===16?0.6:0,stones:n>=6,holes:n>=9,colors};
 }
 const levelSeed=n=>(n*7919+17)>>>0;
 function makeLevel(n){return genGarden(levelSpec(n),levelSeed(Math.max(1,Math.floor(n)||1)));}
@@ -127,10 +129,11 @@ function growGarden(spec,r){
     for(const i of pipes.slice(0,Math.max(1,Math.round(pipes.length*0.12))))cells[i].kind="stone";
   }
   const turn=cells.map((c,i)=>i).filter(i=>canTurn(cells[i])&&rot(cells[i].sol,1)!==cells[i].sol);
-  if(spec.scramble){
-    // the first gardens turn only a few tiles, so they teach the game
+  if(spec.scramble||spec.share){
+    // the first gardens, and the first of each new rain, turn only some tiles, so they teach the game
     shuffle(turn,r);
-    for(const i of turn.slice(0,spec.scramble)){const c=cells[i],ks=[1,2,3].filter(q=>rot(c.sol,q)!==c.sol);c.mask=rot(c.sol,ks[Math.floor(r()*ks.length)]);}
+    const count=spec.scramble||Math.max(2,Math.round(turn.length*spec.share));
+    for(const i of turn.slice(0,count)){const c=cells[i],ks=[1,2,3].filter(q=>rot(c.sol,q)!==c.sol);c.mask=rot(c.sol,ks[Math.floor(r()*ks.length)]);}
   }else for(const i of turn)cells[i].mask=rot(cells[i].sol,Math.floor(r()*4));
   const L={spec,w,h,cells,moves:0,hints:0};
   for(let guard=0;isSolved(L)&&guard<200;guard++){const i=turn[Math.floor(r()*turn.length)];if(i!=null)cells[i].mask=rot(cells[i].mask,1);}
@@ -214,6 +217,11 @@ function selfTestLogic(){
   const specs=[[1,"cloud",1],[6,"stones",1],[9,"holes",1],[12,"colours",2],[16,"colours",3]];
   for(const [n,,k] of specs)if(levelSpec(n).colors!==k)problems.push("garden "+n+" should have "+k+" colours");
   if(!levelSpec(6).stones||levelSpec(5).stones||!levelSpec(9).holes||levelSpec(8).holes)problems.push("stones or gaps arrive at the wrong garden");
+  // the gentler curve from the 2026-10-14 playtest
+  if(levelSpec(5).scramble!==11||levelSpec(8).scramble!==22||levelSpec(9).scramble!==0)problems.push("gardens 5-8 should turn only some tiles");
+  if(!(levelSpec(12).share>0&&levelSpec(16).share>0)||levelSpec(13).share||levelSpec(17).share)problems.push("only the first garden of each new rain should turn some tiles");
+  const area=n=>levelSpec(n).w*levelSpec(n).h;
+  if(area(12)>=area(11)||area(16)>area(15))problems.push("a new kind of rain should start in a garden no larger than the one before");
   for(let n=1;n<=60;n++){
     const where="garden "+n;
     try{
@@ -266,6 +274,8 @@ const cv=document.getElementById("c");
 let g=cv.getContext("2d"),VW=W,VH=H;
 const view={scale:1,ox:0,oy:0},UI={panel:null,area:null,buttons:[]};
 const BUTTONS=[["hint","Hint"],["restart","Restart"],["levels","Gardens"],["daily","Daily"],["sound","Sound"]];
+// the credit line stays at least 15 px tall on an 800x450 screen (CrazyGames reads games at that size)
+const FOOT_PX=24;
 function fit(){
   const portrait=innerWidth<innerHeight*0.8;
   VW=portrait?H:W;VH=portrait?W:H;
@@ -282,7 +292,7 @@ function layout(){
   UI.area=portrait?{x:20,y:310,w:VW-40,h:VH-350}:{x:320,y:80,w:VW-350,h:VH-110};
   UI.buttons=BUTTONS.map(([id,label],k)=>portrait
     ?{id,label,x:20+k*((VW-40)/5),y:150,w:(VW-40)/5-10,h:60}
-    :{id,label,x:30,y:290+k*70,w:240,h:56});
+    :{id,label,x:30,y:270+k*60,w:240,h:50});
 }
 
 // ---------- look: five garden worlds, ten gardens each, then round again ----------
@@ -403,11 +413,15 @@ const inside=(b,x,y)=>x>=b.x&&y>=b.y&&x<b.x+b.w&&y<b.y+b.h;
 function boardGeom(){const a=UI.area,ts=Math.floor(Math.min(a.w/L.w,a.h/L.h,128));return {ts,bx:Math.round(a.x+(a.w-ts*L.w)/2),by:Math.round(a.y+(a.h-ts*L.h)/2)};}
 function tileCentre(i){const {ts,bx,by}=boardGeom();return [bx+(i%L.w+0.5)*ts,by+(((i/L.w)|0)+0.5)*ts];}
 function tileAt(x,y){if(!L)return -1;const {ts,bx,by}=boardGeom(),tx=Math.floor((x-bx)/ts),ty=Math.floor((y-by)/ts);return tx<0||ty<0||tx>=L.w||ty>=L.h?-1:ty*L.w+tx;}
-function winBox(){const a=UI.area,w=Math.min(a.w-20,540),h=300;return {x:a.x+(a.w-w)/2,y:a.y+(a.h-h)/2,w,h};}
+// the bloom panel sits over the side panel (landscape) or the top panel (portrait), never over the garden,
+// so the open flowers and the rainbow stay in view
+function winBox(){return VW<VH?{x:20,y:14,w:VW-40,h:282}:{x:14,y:100,w:UI.panel.w-28,h:VH-180};}
 function winButtons(){
-  const b=winBox();
-  return [{id:"next",label:cur.mode==="daily"?"Back to gardens":"Next garden ▶",x:b.x+30,y:b.y+b.h-84,w:b.w*0.58-30,h:56,primary:true},
-          {id:"again",label:"Play again",x:b.x+b.w*0.58+10,y:b.y+b.h-84,w:b.w*0.42-40,h:56}];
+  const b=winBox(),label=cur.mode==="daily"?"Back to gardens":"Next garden ▶";
+  if(b.w<400)return [{id:"next",label,x:b.x+20,y:b.y+b.h-150,w:b.w-40,h:60,primary:true},
+                     {id:"again",label:"Play again",x:b.x+20,y:b.y+b.h-76,w:b.w-40,h:56}];
+  return [{id:"next",label,x:b.x+30,y:b.y+b.h-76,w:b.w*0.58-30,h:56,primary:true},
+          {id:"again",label:"Play again",x:b.x+b.w*0.58+10,y:b.y+b.h-76,w:b.w*0.42-40,h:56}];
 }
 function levelsBox(){const w=Math.min(VW-60,760),h=Math.min(VH-60,560);return {x:(VW-w)/2,y:(VH-h)/2,w,h};}
 function slotRect(k){const b=levelsBox(),cw=(b.w-60)/6,ch=(b.h-170)/5;return {x:b.x+30+(k%6)*cw,y:b.y+75+Math.floor(k/6)*ch,w:cw-10,h:ch-10};}
@@ -420,7 +434,7 @@ function press(x,y,dir){
   kb.on=false;
   if(demo)return;
   if(overlay){for(const b of overlayButtons())if(inside(b,x,y)){act(b.id);return;}if(!inside(levelsBox(),x,y))overlay=null;return;}
-  if(won){if(now()>=solvedAt)for(const b of winButtons())if(inside(b,x,y)){act(b.id);return;}}
+  if(won&&now()>=solvedAt){for(const b of winButtons())if(inside(b,x,y)){act(b.id);return;}if(inside(winBox(),x,y))return;}
   for(const b of UI.buttons)if(inside(b,x,y)){act(b.id);return;}
   turn(tileAt(x,y),dir);
 }
@@ -557,15 +571,18 @@ function drawPanel(){
   if(portrait){
     g.font="600 26px system-ui,sans-serif";g.fillText(name+"  ·  "+world.name,cx,104);
     g.font="22px system-ui,sans-serif";g.fillStyle=world.soft;g.fillText(status,cx,136);
-    g.font="15px system-ui,sans-serif";g.fillText("Made by MV2 of Munim, Inc. with AI agents",VW/2,VH-16);
+    g.font=FOOT_PX+"px system-ui,sans-serif";g.fillText("Made by MV2 of Munim, Inc. with AI agents",VW/2,VH-18);
   }else{
     g.font="600 28px system-ui,sans-serif";g.fillText(name,cx,134);
     g.font="20px system-ui,sans-serif";g.fillStyle=world.soft;g.fillText(world.name,cx,162);
-    drawStars(cx,202,best,15);
-    g.fillStyle=world.ink;g.font="22px system-ui,sans-serif";g.fillText(status,cx,256);
-    g.font="15px system-ui,sans-serif";g.fillStyle=world.soft;
-    g.fillText("Click: turn · Right-click: turn back",cx,VH-62);g.fillText("Arrows + Space · H hint · M sound",cx,VH-40);
-    g.fillText("Made by MV2 of Munim, Inc. with AI agents",cx,VH-18);
+    drawStars(cx,198,best,15);
+    g.fillStyle=world.ink;g.font="22px system-ui,sans-serif";g.fillText(status,cx,248);
+    // the credit line wraps to fit the side panel; the key help sits just above it
+    g.font=FOOT_PX+"px system-ui,sans-serif";g.fillStyle=world.soft;
+    const foot=wrap("Made by MV2 of Munim, Inc. with AI agents",p.w-40),fy=VH-24-(foot.length-1)*28;
+    foot.forEach((l,q)=>g.fillText(l,cx,fy+q*28));
+    g.font="16px system-ui,sans-serif";
+    g.fillText("Click: turn · Right-click: back",cx,fy-52);g.fillText("Keys: arrows, Space, H, M",cx,fy-30);
   }
   for(const b of UI.buttons)drawButton(b,buttonLabel(b),false);
 }
@@ -580,14 +597,17 @@ function drawBanner(){
   lines.forEach((l,q)=>g.fillText(l,a.x+a.w/2,y+30+q*28));
 }
 function drawWin(){
-  const b=winBox(),cx=b.x+b.w/2;
+  const b=winBox(),cx=b.x+b.w/2,narrow=b.w<400;
   g.fillStyle="rgba(255,255,255,0.95)";rr(b.x,b.y,b.w,b.h,22);g.fill();
-  g.fillStyle="#1d3b2a";g.textAlign="center";g.font="bold 36px system-ui,sans-serif";
-  g.fillText(cur.mode==="daily"?"Today's garden blooms!":"Garden "+cur.n+" blooms!",cx,b.y+58);
-  drawStars(cx,b.y+112,stars(L),24);
+  g.fillStyle="#1d3b2a";g.textAlign="center";g.font="bold "+(narrow?32:36)+"px system-ui,sans-serif";
+  let y=b.y+(narrow?56:52);
+  for(const l of wrap(cur.mode==="daily"?"Today's garden blooms!":"Garden "+cur.n+" blooms!",b.w-30).slice(0,2)){g.fillText(l,cx,y);y+=narrow?40:42;}
+  drawStars(cx,y+(narrow?24:14),stars(L),narrow?20:22);
+  y+=narrow?92:76;
   g.font="22px system-ui,sans-serif";g.fillStyle="#4d6b57";
   const n=save.daily.streak;
-  g.fillText(cur.mode==="daily"?"Daily streak: "+n+(n===1?" day":" days")+". See you tomorrow!":"Turns "+L.moves+" · par "+L.par+(L.hints?" · hint used":""),cx,b.y+172);
+  const line=cur.mode==="daily"?"Daily streak: "+n+(n===1?" day":" days")+". See you tomorrow!":"Turns "+L.moves+" · par "+L.par+(L.hints?" · hint used":"");
+  for(const l of wrap(line,b.w-30).slice(0,3)){g.fillText(l,cx,y);y+=28;}
   for(const btn of winButtons())drawButton(btn,btn.label,btn.primary);
 }
 function drawLevels(){
@@ -698,7 +718,7 @@ start("level",Math.max(1,save.level));
 if(save.mute)audio.toggle();
 if(location.hash==="#selftest"){
   const r=selfTest(),box=document.getElementById("test");box.hidden=false;
-  box.textContent=`Rainbloom self-test (v0.1.0): ${r.ms} ms.\n`+(r.problems.length?`${r.problems.length} problem(s):\n`+r.problems.slice(0,40).join("\n"):"No problems found.")+"\n\nClick to close.";
+  box.textContent=`Rainbloom self-test (v0.1.1): ${r.ms} ms.\n`+(r.problems.length?`${r.problems.length} problem(s):\n`+r.problems.slice(0,40).join("\n"):"No problems found.")+"\n\nClick to close.";
   box.onclick=()=>{box.hidden=true;location.hash="";};
   console.log("self-test:",r.problems.length,"problems",r.problems);
   start("level",Math.max(1,save.level));
